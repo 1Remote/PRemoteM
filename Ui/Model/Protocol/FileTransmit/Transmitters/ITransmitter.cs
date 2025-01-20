@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Media.Imaging;
 using Shawn.Utils;
 using Shawn.Utils.Wpf.Image;
@@ -46,30 +47,30 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters
 
     public interface ITransmitter
     {
-        void Conn();
+        Task Conn();
 
         bool IsConnected();
 
         ITransmitter Clone();
 
-        RemoteItem? Get(string path);
+        Task<RemoteItem?> Get(string path);
 
         /// <summary>
         /// get items of a directory, sub-directory treat as a item too
         /// </summary>
         /// <param name="path"></param>
         /// <returns></returns>
-        List<RemoteItem> ListDirectoryItems(string path);
+        Task<List<RemoteItem>> ListDirectoryItems(string path);
 
-        bool Exists(string path);
+        Task<bool> Exists(string path);
 
-        void Delete(string path);
+        Task Delete(string path);
 
-        void Delete(RemoteItem item);
+        Task Delete(RemoteItem item);
 
-        void CreateDirectory(string path);
+        Task CreateDirectory(string path);
 
-        void RenameFile(string path, string newPath);
+        Task RenameFile(string path, string newPath);
 
         /// <summary>
         /// write local file to server path
@@ -78,7 +79,7 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters
         /// <param name="saveToRemotePath"></param>
         /// <param name="writeCallBack">callback will offer data length has been written</param>
         /// <param name="cancellationToken"></param>
-        void UploadFile(string localFilePath, string saveToRemotePath, Action<ulong> writeCallBack, CancellationToken cancellationToken);
+        Task UploadFile(string localFilePath, string saveToRemotePath, Action<ulong> writeCallBack, CancellationToken cancellationToken);
 
         /// <summary>
         /// read server path and written to local fileStream\
@@ -87,7 +88,7 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters
         /// <param name="saveToLocalPath"></param>
         /// <param name="readCallBack">callback will offer data length has been written</param>
         /// <param name="cancellationToken"></param>
-        void DownloadFile(string remoteFilePath, string saveToLocalPath, Action<ulong> readCallBack, CancellationToken cancellationToken);
+        Task DownloadFile(string remoteFilePath, string saveToLocalPath, Action<ulong> readCallBack, CancellationToken cancellationToken);
 
         void Release();
     }

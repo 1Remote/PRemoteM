@@ -200,10 +200,13 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
             }
         }
 
+        private static readonly object _progressLock = new object();
+
         public string TransmittedPercentage =>
             TransmitTaskStatus == ETransmitTaskStatus.Transmitted ? "100" :
                 (TransmitTaskStatus != ETransmitTaskStatus.Transmitting ? "0" :
-                   (TransmittedByteLength >= TotalByteLength ? "100" : (100.0 * TransmittedByteLength / TotalByteLength).ToString("F")));
+                    (TransmittedByteLength >= TotalByteLength ? "100" :
+                        (Math.Floor(10000.0 * TransmittedByteLength / TotalByteLength) / 100.0).ToString("F")));
 
         public List<TransmitItem> ItemsHaveBeenTransmitted { get; } = new List<TransmitItem>();
         public Queue<TransmitItem> ItemsWaitForTransmit { get; } = new Queue<TransmitItem>();
@@ -327,7 +330,7 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
             }
         }
 
-        private void AddServerDirectory(RemoteItem topItem)
+        private async Task AddServerDirectory(RemoteItem topItem)
         {
             Debug.Assert(_trans != null);
             Debug.Assert(TransmissionType == ETransmissionType.ServerToHost);
@@ -336,7 +339,9 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
 
             try
             {
-                if (_trans?.Exists(topItem.FullName) != true)
+                if (_trans == null)
+                    return;
+                if (await _trans.Exists(topItem.FullName) != true)
                     return;
 
                 var srcParentDirPath = topItem.FullName.TrimEnd('/', '\\');
@@ -352,7 +357,7 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
                 while (dirPaths.Any())
                 {
                     var path = dirPaths.Dequeue();
-                    var rms = _trans.ListDirectoryItems(path);
+                    var rms = await _trans.ListDirectoryItems(path);
                     foreach (var item in rms)
                     {
                         if (item.IsDirectory && !item.IsSymlink && item.Name != "..")
@@ -386,15 +391,15 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
                 && TransmitTaskStatus != ETransmitTaskStatus.Transmitted)
             {
                 TransmitTaskStatus = ETransmitTaskStatus.Scanning;
-                await Task.Factory.StartNew(() =>
+                await Task.Factory.StartNew(async () =>
                 {
                     try
                     {
                         ScanTransmitItems();
 
-                        if (CheckExistedFiles(remoteItems))
+                        if (await CheckExistedFiles(remoteItems))
                         {
-                            RunTransmit();
+                            await RunTransmit();
                             SimpleLogHelper.Debug($"{nameof(TransmitTask)}: OnTaskEnd?.Invoke({TransmitTaskStatus}, null); ");
                         }
                         else
@@ -491,14 +496,15 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
             return false;
         }
 
-        private bool CheckExistedFileHostToServer(TransmitItem item, IEnumerable<RemoteItem> remoteItem)
+        private async Task<bool> CheckExistedFileHostToServer(TransmitItem item, IEnumerable<RemoteItem> remoteItem)
         {
             if (!item.IsDirectory)
             {
                 if (remoteItem.Any(x => x.IsDirectory == false && x.Name == item.ItemName))
                     return true;
-                if (_trans?.Exists(item.DstPath) == true)
-                    return true;
+                if (_trans != null)
+                    if (await _trans.Exists(item.DstPath) == true)
+                        return true;
             }
             return false;
         }
@@ -507,7 +513,7 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
         /// check if any same name file exited, return if can continue transmit.
         /// </summary>
         /// <returns></returns>
-        private bool CheckExistedFiles(IEnumerable<RemoteItem> remoteItems)
+        private async Task<bool> CheckExistedFiles(IEnumerable<RemoteItem> remoteItems)
         {
             // check if existed
             int existedFiles = 0;
@@ -523,7 +529,7 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
                         }
                     case ETransmissionType.HostToServer:
                         {
-                            if (CheckExistedFileHostToServer(item, remoteItems))
+                            if (await CheckExistedFileHostToServer(item, remoteItems))
                                 ++existedFiles;
                             break;
                         }
@@ -542,14 +548,14 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
 
         private void DataTransmitting(ref TransmitItem item, ulong readLength)
         {
-            lock (item)
+            lock (_progressLock)
             {
                 try
                 {
-                    if (readLength > item.TransmittedSize && readLength <= item.ByteSize)
+                    if (readLength > item.TransmittedSize)
                     {
                         var add = readLength - item.TransmittedSize;
-                        item.TransmittedSize = readLength;
+                        item.TransmittedSize += add;
                         TransmittedByteLength += add;
                         _transmittedDataLength.Enqueue(new Tuple<DateTime, ulong>(DateTime.Now, add));
                         RaisePropertyChanged(nameof(TransmitSpeed));
@@ -565,11 +571,11 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
                         {"item.ByteSize", item.ByteSize.ToString()},
                     });
                     SimpleLogHelper.Fatal(e, $"readLength = {readLength}, item.TransmittedSize = {item.TransmittedSize}, item.ByteSize = {item.ByteSize}");
-                } 
+                }
             }
         }
 
-        private void RunTransmitServerToHost(TransmitItem item)
+        private async Task RunTransmitServerToHost(TransmitItem item)
         {
             if (item.IsDirectory)
             {
@@ -584,48 +590,38 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
                 if (fi!.Exists)
                     fi.Delete();
 
-                item.TransmittedSize = 0;
-                _trans?.DownloadFile(item.SrcPath, item.DstPath, readLength =>
+                if (_trans != null)
                 {
-                    try
-                    {
-                        DataTransmitting(ref item, readLength);
-
-                        var add = readLength - item.TransmittedSize;
-                        item.TransmittedSize = readLength;
-                        TransmittedByteLength += add;
-                        _transmittedDataLength.Enqueue(new Tuple<DateTime, ulong>(DateTime.Now, add));
-                        RaisePropertyChanged(nameof(TransmitSpeed));
-                        SimpleLogHelper.Debug($"{DateTime.Now}: {TransmittedByteLength}done, {TransmittedPercentage}%");
-                    }
-                    catch (Exception e)
-                    {
-                        SimpleLogHelper.Error(e);
-                    }
-                }, _cancellationSource.Token);
+                    item.TransmittedSize = 0;
+                    await _trans.DownloadFile(item.SrcPath, item.DstPath,
+                                              readLength => { DataTransmitting(ref item, readLength); },
+                                              _cancellationSource.Token);
+                }
             }
         }
 
-        private void RunTransmitHostToServer(TransmitItem item)
+        private async Task RunTransmitHostToServer(TransmitItem item)
         {
-            if (item.IsDirectory)
+            if (_trans != null)
             {
-                _trans?.CreateDirectory(item.DstPath);
-            }
-            else if (File.Exists(item.SrcPath))
-            {
-                if (_trans?.Exists(item.DstPath) == true)
-                    _trans?.Delete(item.DstPath);
-
-                item.TransmittedSize = 0;
-                _trans?.UploadFile(item.SrcPath, item.DstPath, readLength =>
+                if (item.IsDirectory)
                 {
-                    DataTransmitting(ref item, readLength);
-                }, _cancellationSource.Token);
+                    await _trans.CreateDirectory(item.DstPath);
+                }
+                else if (File.Exists(item.SrcPath))
+                {
+                    if (await _trans.Exists(item.DstPath) == true)
+                        await _trans.Delete(item.DstPath);
+
+                    item.TransmittedSize = 0;
+                    await _trans.UploadFile(item.SrcPath, item.DstPath,
+                                            readLength => { DataTransmitting(ref item, readLength); },
+                                            _cancellationSource.Token);
+                }
             }
         }
 
-        private void RunTransmit()
+        private async Task RunTransmit()
         {
             Debug.Assert(_trans != null);
             TransmittedByteLength = 0;
@@ -642,11 +638,11 @@ namespace _1RM.Model.Protocol.FileTransmit.Transmitters.TransmissionController
                     switch (item.TransmissionType)
                     {
                         case ETransmissionType.ServerToHost:
-                            RunTransmitServerToHost(item);
+                            await RunTransmitServerToHost(item);
                             break;
 
                         case ETransmissionType.HostToServer:
-                            RunTransmitHostToServer(item);
+                            await RunTransmitHostToServer(item);
                             break;
                     }
                     SimpleLogHelper.Debug($"Transmit end, ItemsWaitForTransmit.Dequeue()");
